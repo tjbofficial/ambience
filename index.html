@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Ambience">
+<meta name="theme-color" content="#000000">
+<meta name="description" content="Ambience -- a generative ambient music visualiser.">
+<title>Ambience</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="ambience-icon_192x192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="ambience-icon_512x512.png">
+<link rel="apple-touch-icon" href="ambience-icon_192x192.png">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  :root {
+    /* Reserved strip at the bottom for the toolbar (button height + its own
+       clearance from the canvas + extra clearance from an Android gesture
+       nav bar, which mobile browsers often don't fully report via
+       safe-area-inset-bottom). Bump this if buttons still crowd the nav
+       bar on a given device. */
+    --bottom-reserve: calc(env(safe-area-inset-bottom, 0px) + 118px);
+    --top-reserve: env(safe-area-inset-top, 0px);
+  }
+  canvas {
+    display: block;
+    position: fixed;
+    top: var(--top-reserve);
+    left: 50%;
+    transform: translateX(-50%);
+    /* Lock the visualiser to a 9:16 portrait frame, flush to the top and
+       stopping above the reserved toolbar strip -- never overlapping it. */
+    width: min(100vw, calc((100vh - var(--top-reserve) - var(--bottom-reserve)) * 9 / 16));
+    height: min(calc(100vh - var(--top-reserve) - var(--bottom-reserve)), calc(100vw * 16 / 9));
+    touch-action: none;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+  }
+  #toolbar {
+    position: fixed;
+    left: 0; right: 0;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 34px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 14px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .btn {
+    pointer-events: auto;
+    width: 58px; height: 58px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #2a2a2a, #050505 70%);
+    border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.6), inset 0 0 8px rgba(255,255,255,0.04);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: #d8d8d8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .btn:active {
+    transform: scale(0.92);
+  }
+  .btn.active {
+    border-color: rgba(255,255,255,0.5);
+    box-shadow: 0 0 14px rgba(255,255,255,0.25), inset 0 0 8px rgba(255,255,255,0.08);
+  }
+  .btn .icon {
+    font-size: 19px;
+    line-height: 1.05;
+    max-width: 46px;
+    text-align: center;
+    white-space: normal;
+    word-break: break-word;
+    overflow: hidden;
+  }
+  /* Roman-style serif face for the Key label specifically, per request. */
+  #btnKeyIcon {
+    font-family: Georgia, "Times New Roman", Times, serif;
+    font-size: 16px;
+  }
+  #hint {
+    position: fixed;
+    top: max(18px, env(safe-area-inset-top));
+    left: 0; right: 0;
+    text-align: center;
+    color: rgba(255,255,255,0.35);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    pointer-events: none;
+    z-index: 10;
+    transition: opacity 0.6s ease;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="hint">tap to begin</div>
+
+<div id="toolbar">
+  <div class="btn" id="btnPlay">
+    <div class="icon" id="btnPlayIcon">&#9658;</div>
+  </div>
+  <div class="btn" id="btnKey">
+    <div class="icon" id="btnKeyIcon">C#</div>
+  </div>
+  <div class="btn" id="btnScale">
+    <div class="icon" id="btnScaleIcon" style="font-size:15px;">ii</div>
+  </div>
+  <div class="btn" id="btnShape">
+    <div class="icon" id="btnShapeIcon">&#9678;</div>
+  </div>
+  <div class="btn" id="btnTimer">
+    <div class="icon" id="btnTimerIcon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="7"/><line x1="7" y1="6" x2="4" y2="3"/><line x1="17" y1="6" x2="20" y2="3"/><line x1="12" y1="13" x2="12" y2="9"/><line x1="12" y1="13" x2="15" y2="13"/></svg></div>
+  </div>
+</div>
+
+<script>
+(function() {
+"use strict";
+
+// ---------------------------------------------------------------------------
+// MUSIC THEORY
+// ---------------------------------------------------------------------------
+
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+// Extensible scale library: semitone intervals from root within one octave.
+// Add more scales here later -- everything downstream reads from this array.
+// "short" is the chord-symbol style label shown on the toolbar button.
+// Ordered starting with Dorian (least altered vs. a diatonic mode) through
+// to Whole Tone (fully symmetric / furthest from anything diatonic). The
+// first five follow the roman-numeral scale-degree sequence ii-iii-IV-V-vi.
+const SCALES = [
+  { name: "Dorian", short: "ii", intervals: [0,2,3,5,7,9,10] },
+  { name: "Phrygian", short: "iii", intervals: [0,1,3,5,7,8,10] },
+  { name: "Lydian", short: "IV", intervals: [0,2,4,6,7,9,11] },
+  { name: "Mixolydian", short: "V", intervals: [0,2,4,5,7,9,10] },
+  { name: "Aeolian", short: "vi", intervals: [0,2,3,5,7,8,10] },
+  { name: "Locrian 6", short: "m7♭5 (13)", intervals: [0,1,3,5,6,9,10] },
+  { name: "Lydian b3", short: "m(maj7) ♯11", intervals: [0,2,3,6,7,9,11] },
+  { name: "Hungarian Major", short: "7(♯9,♯11,13)", intervals: [0,3,4,6,7,9,10] },
+  { name: "Major 7th Pentatonic", short: "maj9 (no5)", intervals: [0,2,4,7,11] },
+  { name: "Hirajoshi", short: "m(add9, ♭13)", intervals: [0,2,3,7,8] },
+  { name: "Whole Tone", short: "12T", intervals: [0,2,4,6,8,10] }
+];
+
+let state = {
+  playing: false,
+  stopping: false,    // true during the timed slow fade-out window
+  rootIndex: 1,       // 0 = C .. 11 = B -- default key C#
+  scaleIndex: 0,       // index into SCALES
+  shapeIndex: 3,       // index into SHAPE_TYPES -- default "ripple" (wave circle)
+  timerIndex: 0        // index into TIMER_OPTIONS
+};
+
+// True only while the app should actually be generating new notes/shapes --
+// false both when fully stopped and during the timed slow fade-out.
+function isActive() {
+  return state.playing && !state.stopping;
+}
+
+const TIMER_OPTIONS = [
+  { label: "∞", minutes: 0 },
+  { label: "15", minutes: 15 },
+  { label: "60", minutes: 60 }
+];
+
+let timerEndAt = null;
+let timerCountdownInterval = null;
+const TIMER_FADE_SECONDS = 10;
+
+function currentScale() { return SCALES[state.scaleIndex]; }
+
+// Build a multi-octave "scale ladder" of MIDI note numbers for the active
+// key + scale, spanning a few octaves so tap position has real range.
+function buildLadder() {
+  const ladder = [];
+  const baseOctaveMidi = 48; // C3-ish center
+  for (let oct = -1; oct <= 2; oct++) {
+    currentScale().intervals.forEach(iv => {
+      ladder.push(baseOctaveMidi + state.rootIndex + iv + oct * 12);
+    });
+  }
+  ladder.sort((a,b) => a-b);
+  return ladder;
+}
+
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+// Chromatic hue wheel: pitch class always maps to the same hue regardless
+// of key, so the visual language stays stable as the Key control changes.
+function pitchClassHue(midi) {
+  const pc = ((midi % 12) + 12) % 12;
+  return (pc / 12) * 360;
+}
+
+function isRootOrFifth(midi) {
+  const pc = ((midi % 12) + 12) % 12;
+  const rel = ((pc - state.rootIndex) + 12) % 12;
+  return rel === 0 || rel === 7;
+}
+
+// C3 in MIDI (C4 = 60). Notes below this are allowed but deliberately made
+// less likely to come up, both from taps/position and from the generative
+// chain, rather than being excluded outright.
+const C3_MIDI = 48;
+function biasAboveC3(midi) {
+  if (midi < C3_MIDI && Math.random() < 0.75) {
+    return midi + 12; // shift up an octave -- stays in the same scale
+  }
+  return midi;
+}
+
+// Map a tap position to a MIDI note along a diagonal axis: lowest notes
+// live at bottom-left (7 o'clock), highest notes at top-right (2 o'clock).
+// x/W and (1 - y/H) both push the fraction toward 1 (high) as you move
+// right and up; both push toward 0 (low) as you move left and down.
+// The axis fraction is warped (raised to a power > 1) so the very lowest
+// register only occupies a small sliver near the bottom-left corner,
+// rather than a proportional share of the frame.
+function positionToMidi(x, y) {
+  const ladder = buildLadder();
+  const axisFrac = ((x / W) + (1 - y / H)) / 2;
+  const warped = Math.pow(axisFrac, 1.35);
+  const idx = Math.min(ladder.length - 1, Math.max(0,
+    Math.round(warped * (ladder.length - 1))));
+  return biasAboveC3(ladder[idx]);
+}
+
+function randomScaleMidi(nearMidi) {
+  const ladder = buildLadder();
+  // bias toward notes near the triggering shape's pitch for smoother harmony
+  let idx = ladder.reduce((best, m, i) =>
+    Math.abs(m - nearMidi) < Math.abs(ladder[best] - nearMidi) ? i : best, 0);
+  const spread = 4;
+  const offset = Math.floor(Math.random() * (spread * 2 + 1)) - spread;
+  idx = Math.min(ladder.length - 1, Math.max(0, idx + offset));
+  return biasAboveC3(ladder[idx]);
+}
+
+// ---------------------------------------------------------------------------
+// AUDIO ENGINE
+// ---------------------------------------------------------------------------
+
+let audioCtx = null;
+let masterGain = null;
+let reverbNode = null;
+let dryGain = null;
+let wetGain = null;
+let compressor = null;
+let limiter = null;
+
+// C5 in MIDI (A4 = 69 = 440Hz, so C4 = 60, C5 = 72). Used to decide how
+// wide a note's random stereo placement is allowed to be.
+const C5_MIDI = 72;
+function randomPanForMidi(midi) {
+  if (midi >= C5_MIDI) {
+    return (Math.random() * 2 - 1);        // full L100 - R100
+  }
+  return (Math.random() * 2 - 1) * 0.2;    // narrow L20 - R20
+}
+
+function buildReverbImpulse(ctx, seconds, decay) {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(rate * seconds);
+  const impulse = ctx.createBuffer(2, length, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+    }
+  }
+  return impulse;
+}
+
+function initAudio() {
+  if (audioCtx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  audioCtx = new AC();
+
+  // Force stereo throughout the graph (some browsers default new contexts
+  // to mono until a node explicitly asks for 2 channels).
+  try { audioCtx.destination.channelCount = 2; } catch (e) {}
+  try { audioCtx.destination.channelCountMode = "explicit"; } catch (e) {}
+  try { audioCtx.destination.channelInterpretation = "speakers"; } catch (e) {}
+
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.9;
+  masterGain.channelCount = 2;
+  masterGain.channelCountMode = "explicit";
+
+  // Compressor: gently glues overlapping voices together so the mix
+  // doesn't get louder just because more shapes are stacking.
+  compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -20;
+  compressor.knee.value = 22;
+  compressor.ratio.value = 4;
+  compressor.attack.value = 0.02;
+  compressor.release.value = 0.4;
+
+  // Limiter: a second, much harder stage right before the output so
+  // nothing can ever clip even if many voices peak at once.
+  limiter = audioCtx.createDynamicsCompressor();
+  limiter.threshold.value = -3;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.15;
+
+  dryGain = audioCtx.createGain();
+  dryGain.gain.value = 0.55;
+  wetGain = audioCtx.createGain();
+  wetGain.gain.value = 0.45;
+
+  reverbNode = audioCtx.createConvolver();
+  reverbNode.buffer = buildReverbImpulse(audioCtx, 4.5, 2.2);
+
+  masterGain.connect(dryGain);
+  masterGain.connect(reverbNode);
+  reverbNode.connect(wetGain);
+  dryGain.connect(compressor);
+  wetGain.connect(compressor);
+  compressor.connect(limiter);
+  limiter.connect(audioCtx.destination);
+}
+
+// Each active voice: { stopNow(fast), midi, isBell, birth }
+let activeVoices = [];
+const MAX_VOICES = 18;
+
+function playPad(midi) {
+  const freq = midiToFreq(midi);
+  const now = audioCtx.currentTime;
+  const attack = 3.3 + Math.random() * 1.8;
+  const hold = 4.5 + Math.random() * 3;
+  const release = 7.5 + Math.random() * 4.5;
+  const total = attack + hold + release;
+  const peak = 0.09 + Math.random() * 0.05;
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(peak, now + attack);
+  gain.gain.setValueAtTime(peak, now + attack + hold);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + total);
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 900;
+  filter.Q.value = 0.4;
+
+  const lfo = audioCtx.createOscillator();
+  lfo.frequency.value = 0.05 + Math.random() * 0.08;
+  const lfoGain = audioCtx.createGain();
+  lfoGain.gain.value = 220;
+  lfo.connect(lfoGain);
+  lfoGain.connect(filter.frequency);
+  lfo.start(now);
+  lfo.stop(now + total + 0.5);
+
+  const oscs = [];
+  const detunes = [-6, 0, 5];
+  detunes.forEach(cents => {
+    const osc = audioCtx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+    osc.detune.value = cents;
+    osc.connect(filter);
+    osc.start(now);
+    osc.stop(now + total + 0.5);
+    oscs.push(osc);
+  });
+
+  const panner = audioCtx.createStereoPanner();
+  panner.pan.value = randomPanForMidi(midi);
+
+  filter.connect(gain);
+  gain.connect(panner);
+  panner.connect(masterGain);
+
+  const voice = {
+    midi, isBell: false, birth: performance.now(),
+    lifespanMs: total * 1000,
+    // mode "evict": quick natural fade when bumped by the voice cap.
+    // mode "pause": much quicker cut, used when the user hits Play/Stop.
+    stopNow(mode) {
+      const t = audioCtx.currentTime;
+      const dur = mode === "pause" ? 0.08 : 0.35;
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(gain.gain.value, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      oscs.forEach(o => { try { o.stop(t + dur + 0.05); } catch(e){} });
+      try { lfo.stop(t + dur + 0.05); } catch(e){}
+    }
+  };
+  return voice;
+}
+
+function playBell(midi) {
+  const freq = midiToFreq(midi);
+  const now = audioCtx.currentTime;
+  const decay = 6 + Math.random() * 3.5;
+  const peak = 0.16;
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.linearRampToValueAtTime(peak, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+
+  const panner = audioCtx.createStereoPanner();
+  panner.pan.value = randomPanForMidi(midi);
+  gain.connect(panner);
+  panner.connect(masterGain);
+
+  // Inharmonic partials for a bell-like/metallic timbre.
+  const ratios = [1, 2.41, 3.9, 5.4];
+  const partialGains = [1, 0.5, 0.28, 0.14];
+  const oscs = [];
+  ratios.forEach((ratio, i) => {
+    const osc = audioCtx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = freq * ratio;
+    const pg = audioCtx.createGain();
+    pg.gain.setValueAtTime(partialGains[i], now);
+    pg.gain.exponentialRampToValueAtTime(0.0001, now + decay * (0.5 + i * 0.15));
+    osc.connect(pg);
+    pg.connect(gain);
+    osc.start(now);
+    osc.stop(now + decay + 0.5);
+    oscs.push(osc);
+  });
+
+  const voice = {
+    midi, isBell: true, birth: performance.now(),
+    lifespanMs: decay * 1000,
+    stopNow(mode) {
+      const t = audioCtx.currentTime;
+      const dur = mode === "pause" ? 0.06 : 0.2;
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(gain.gain.value, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      oscs.forEach(o => { try { o.stop(t + dur + 0.05); } catch(e){} });
+    }
+  };
+  return voice;
+}
+
+function spawnVoice(midi) {
+  if (!audioCtx) return null;
+  const eligible = isRootOrFifth(midi);
+  const useBell = eligible && Math.random() < 0.4;
+  const voice = useBell ? playBell(midi) : playPad(midi);
+
+  activeVoices.push(voice);
+  if (activeVoices.length > MAX_VOICES) {
+    const oldest = activeVoices.shift();
+    oldest.stopNow("evict");
+  }
+  return voice;
+}
+
+// Used when the user hits Play/Stop -- silence should land fast.
+function stopAllVoicesFast() {
+  activeVoices.forEach(v => v.stopNow("pause"));
+  activeVoices = [];
+}
+
+// ---------------------------------------------------------------------------
+// VISUALS
+// ---------------------------------------------------------------------------
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  // The canvas element's on-screen box is the locked 9:16 frame (set via
+  // CSS), not the full viewport -- read its actual rendered size.
+  const rect = canvas.getBoundingClientRect();
+  W = rect.width;
+  H = rect.height;
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// "triangle" and "quad" are deliberately misshapen (scalene/irregular) --
+// each instance gets randomised vertex lengths, so an edge can reach the
+// screen boundary earlier or later than a regular shape would, giving new
+// notes a less predictable, less metronomic trigger rhythm.
+const SHAPE_TYPES = ["circle", "pentagon", "hexagon", "ripple", "triangle", "quad"];
+const SHAPE_ICONS = { circle: "●", pentagon: "⬟", hexagon: "⬢", ripple: "◎", triangle: "▲", quad: "◆" };
+const IRREGULAR_TYPES = { triangle: 3, quad: 4 };
+
+function wallAngleFor(edge) {
+  if (edge === "left") return Math.PI;
+  if (edge === "right") return 0;
+  if (edge === "top") return -Math.PI / 2;
+  return Math.PI / 2; // bottom
+}
+
+function angleDiff(a, b) {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return Math.abs(d);
+}
+
+// For a misshapen shape, find the vertex nearest (angularly) to the wall
+// the shape is heading toward, and use its length multiplier as the
+// effective growth reach in that direction.
+function reachMultiplierToward(shape, wallAngle) {
+  if (!shape.irregular) return 1;
+  let best = 1, bestDiff = Infinity;
+  shape.irregular.angles.forEach((a, i) => {
+    const ang = shape.irregular.rot0 + a;
+    const diff = angleDiff(ang, wallAngle);
+    if (diff < bestDiff) { bestDiff = diff; best = shape.irregular.mults[i]; }
+  });
+  return best;
+}
+
+let shapes = [];
+const GROWTH_RATE = 32; // px/sec -- slower expansion
+const MAX_LIFE_MS = 20000; // slower decay / longer-lived shapes
+const MIN_TRIGGER_AGE = 1400; // ms -- paces out reflection cascades near a wall
+
+// Distance to the nearest wall, and which wall it is -- used both to know
+// when a shape's edge has "arrived", and where on that wall it landed, so
+// the next shape can spawn from that exact point (like a ripple reflecting
+// off the side of a pond where the wave actually hit).
+function nearestEdgeInfo(x, y) {
+  const dl = x, dr = W - x, dt = y, db = H - y;
+  const dist = Math.min(dl, dr, dt, db);
+  let edge = "left";
+  if (dist === dr) edge = "right";
+  else if (dist === dt) edge = "top";
+  else if (dist === db) edge = "bottom";
+  return { dist, edge };
+}
+
+function spawnShape(x, y, midi, opts) {
+  opts = opts || {};
+  const edgeInfo = nearestEdgeInfo(x, y);
+  const type = opts.type || SHAPE_TYPES[state.shapeIndex];
+
+  let irregular = null;
+  const vertCount = IRREGULAR_TYPES[type];
+  if (vertCount) {
+    const angles = [];
+    const mults = [];
+    for (let i = 0; i < vertCount; i++) {
+      angles.push((i / vertCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.7);
+      mults.push(0.65 + Math.random() * 0.8); // scalene: 0.65x - 1.45x
+    }
+    irregular = { angles, mults, rot0: Math.random() * Math.PI * 2 };
+  }
+
+  const shape = {
+    x, y, midi, type,
+    hue: pitchClassHue(midi),
+    birth: performance.now(),
+    edgeTriggered: false,
+    edgeDist: edgeInfo.dist,
+    edge: edgeInfo.edge,
+    irregular
+  };
+  shape.reachMultiplier = reachMultiplierToward(shape, wallAngleFor(shape.edge));
+
+  // Safety net: if this shape's edge is unlikely to reach a wall (or the
+  // multiplier makes it slower) before it fully decays, force a spawn
+  // partway through its life anyway, so the texture keeps evolving without
+  // needing a fresh tap every time.
+  shape.forceTriggerAt = MAX_LIFE_MS * (0.4 + Math.random() * 0.35);
+
+  shapes.push(shape);
+
+  spawnVoice(midi);
+
+  if (shapes.length > MAX_VOICES) {
+    const evicted = shapes.shift();
+    // The chain must never silently die here: if the shape being evicted
+    // for space hadn't triggered its own follow-on note yet, force that
+    // now. Otherwise a fast burst of spawns just eats its own tail and the
+    // whole thing goes quiet a few seconds after it gets busy.
+    if (evicted && !evicted.edgeTriggered) {
+      evicted.edgeTriggered = true;
+      triggerRandomSpawn(evicted, (opts.depth || 0) + 1);
+    }
+  }
+  return shape;
+}
+
+function drawPolygon(cx, cy, r, sides, rotation, strokeOnly) {
+  ctx.beginPath();
+  for (let i = 0; i <= sides; i++) {
+    const a = rotation + (i / sides) * Math.PI * 2;
+    const px = cx + Math.cos(a) * r;
+    const py = cy + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  if (strokeOnly) ctx.stroke(); else ctx.fill();
+}
+
+function drawIrregular(cx, cy, r, irregular) {
+  ctx.beginPath();
+  irregular.angles.forEach((a, i) => {
+    const ang = irregular.rot0 + a;
+    const rad = r * irregular.mults[i];
+    const px = cx + Math.cos(ang) * rad;
+    const py = cy + Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawStar(cx, cy, r, points, rotation) {
+  ctx.beginPath();
+  const inner = r * 0.42;
+  for (let i = 0; i < points * 2; i++) {
+    const a = rotation + (i / (points * 2)) * Math.PI * 2;
+    const rad = i % 2 === 0 ? r : inner;
+    const px = cx + Math.cos(a) * rad;
+    const py = cy + Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+function renderShape(shape, ageMs) {
+  const r = (ageMs / 1000) * GROWTH_RATE;
+  const lifeFrac = ageMs / MAX_LIFE_MS;
+  const fadeIn = Math.min(1, ageMs / 400);
+  const fadeOut = Math.max(0, 1 - lifeFrac);
+  const alpha = Math.max(0, Math.min(fadeIn, fadeOut));
+  if (alpha <= 0.002) return;
+
+  const hue = shape.hue;
+  // "screen" blending needs several overlapping shapes to build toward
+  // white -- a single shape stays a subtle, clearly-hued glow.
+  ctx.globalCompositeOperation = "screen";
+
+  if (shape.type === "ripple") {
+    for (let ring = 0; ring < 3; ring++) {
+      const rr = r - ring * 22;
+      if (rr <= 0) continue;
+      ctx.beginPath();
+      ctx.arc(shape.x, shape.y, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = `hsla(${hue}, 70%, 46%, ${alpha * (0.32 - ring * 0.08)})`;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+  } else {
+    const grad = ctx.createRadialGradient(shape.x, shape.y, 0, shape.x, shape.y, Math.max(r, 1));
+    grad.addColorStop(0, `hsla(${hue}, 78%, 50%, ${alpha * 0.32})`);
+    grad.addColorStop(0.6, `hsla(${hue}, 78%, 42%, ${alpha * 0.16})`);
+    grad.addColorStop(1, `hsla(${hue}, 78%, 36%, 0)`);
+    ctx.fillStyle = grad;
+
+    if (shape.type === "circle") {
+      ctx.beginPath();
+      ctx.arc(shape.x, shape.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (shape.type === "hexagon") {
+      drawPolygon(shape.x, shape.y, r, 6, ageMs / 4000, false);
+    } else if (shape.type === "pentagon") {
+      drawStar(shape.x, shape.y, r, 5, ageMs / 4000);
+    } else if (shape.irregular) {
+      drawIrregular(shape.x, shape.y, r, shape.irregular);
+    }
+
+    // thin rim for definition
+    ctx.strokeStyle = `hsla(${hue}, 80%, 60%, ${alpha * 0.22})`;
+    ctx.lineWidth = 1;
+    if (shape.type === "circle") {
+      ctx.beginPath();
+      ctx.arc(shape.x, shape.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  ctx.globalCompositeOperation = "source-over";
+  return r;
+}
+
+let lastFrame = 0;
+function animate(ts) {
+  requestAnimationFrame(animate);
+  if (!state.playing) return;
+
+  // subtle trail fade instead of hard clear, for glow persistence
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = "rgba(0,0,0,0.10)";
+  ctx.fillRect(0, 0, W, H);
+
+  const now = performance.now();
+  const survivors = [];
+  for (const shape of shapes) {
+    const age = now - shape.birth;
+    const r = renderShape(shape, age);
+    const effectiveR = r * (shape.reachMultiplier || 1);
+
+    // During the timed slow fade-out, existing shapes keep animating and
+    // ageing out naturally, but nothing new gets spawned.
+    if (isActive()) {
+      // MIN_TRIGGER_AGE stops a shape spawned right next to a wall (from a
+      // reflection) from immediately re-triggering off that same wall a
+      // fraction of a second later -- without it, reflections near a wall
+      // cascade into a burst that eats the whole voice budget in ~2 seconds,
+      // then that whole batch ages out together and everything goes quiet.
+      if (!shape.edgeTriggered && age >= MIN_TRIGGER_AGE && effectiveR >= shape.edgeDist) {
+        shape.edgeTriggered = true;
+        triggerEdgeSpawn(shape);
+      } else if (!shape.edgeTriggered && age >= shape.forceTriggerAt) {
+        // Decay-safety: the shape is at real risk of fading out before its
+        // edge ever reaches a wall -- scatter a new note now instead of
+        // leaving the ambience to go quiet.
+        shape.edgeTriggered = true;
+        triggerRandomSpawn(shape);
+      }
+    }
+
+    if (age < MAX_LIFE_MS) survivors.push(shape);
+  }
+  shapes = survivors;
+}
+requestAnimationFrame(animate);
+
+function triggerEdgeSpawn(shape) {
+  // Reflect from the point on the wall the shape's edge actually reached,
+  // with a little jitter along the wall so ripples don't stack exactly.
+  const jitter = (Math.random() - 0.5) * 90;
+  const inset = 30;
+  let nx, ny;
+  if (shape.edge === "left") {
+    nx = inset;
+    ny = Math.min(H - inset, Math.max(inset, shape.y + jitter));
+  } else if (shape.edge === "right") {
+    nx = W - inset;
+    ny = Math.min(H - inset, Math.max(inset, shape.y + jitter));
+  } else if (shape.edge === "top") {
+    ny = inset;
+    nx = Math.min(W - inset, Math.max(inset, shape.x + jitter));
+  } else {
+    ny = H - inset;
+    nx = Math.min(W - inset, Math.max(inset, shape.x + jitter));
+  }
+
+  const midi = randomScaleMidi(shape.midi);
+  spawnShape(nx, ny, midi);
+}
+
+// Scatter a new note to a randomised point elsewhere on screen -- used when
+// a shape is at risk of decaying before it ever reaches a wall, and also
+// as the guaranteed hand-off when a shape gets cap-evicted before its own
+// natural trigger fired. `depth` only tracks the synchronous eviction
+// cascade within a single spawnShape() call (not the ongoing generative
+// chain across frames), and is just a safety cap against a pathological
+// same-tick cascade.
+function triggerRandomSpawn(shape, depth) {
+  depth = depth || 0;
+  if (depth > 8) return;
+  const nx = 20 + Math.random() * (W - 40);
+  const ny = 20 + Math.random() * (H - 40);
+  const midi = randomScaleMidi(shape.midi);
+  spawnShape(nx, ny, midi, { depth });
+}
+
+// ---------------------------------------------------------------------------
+// AMBIENT PULSE -- the real guarantee of continuous generation
+// ---------------------------------------------------------------------------
+// The shape-to-shape chain (edge reflections + decay-safety) gives organic,
+// clustered variation, but it can still go quiet if a whole batch of shapes
+// happens to have been born together and ages out together. This scheduler
+// is independent of all of that: for as long as playback is on, it seeds a
+// brand new note at a random point on a loose, randomised interval, so the
+// piece can never fully fall silent on its own.
+let ambientTimer = null;
+function scheduleAmbientPulse() {
+  const delay = 2200 + Math.random() * 3200; // ~2.2s - 5.4s
+  ambientTimer = setTimeout(() => {
+    if (isActive()) {
+      const nx = 20 + Math.random() * (W - 40);
+      const ny = 20 + Math.random() * (H - 40);
+      const midi = positionToMidi(nx, ny);
+      spawnShape(nx, ny, midi);
+    }
+    scheduleAmbientPulse();
+  }, delay);
+}
+scheduleAmbientPulse();
+
+// ---------------------------------------------------------------------------
+// UI WIRING
+// ---------------------------------------------------------------------------
+
+const hint = document.getElementById("hint");
+const btnPlay = document.getElementById("btnPlay");
+const btnPlayIcon = document.getElementById("btnPlayIcon");
+const btnKey = document.getElementById("btnKey");
+const btnKeyIcon = document.getElementById("btnKeyIcon");
+const btnScale = document.getElementById("btnScale");
+const btnScaleIcon = document.getElementById("btnScaleIcon");
+const btnShape = document.getElementById("btnShape");
+const btnShapeIcon = document.getElementById("btnShapeIcon");
+const btnTimer = document.getElementById("btnTimer");
+const btnTimerIcon = document.getElementById("btnTimerIcon");
+
+// Simple black/white line-art alarm clock, used whenever the timer is Off.
+const ALARM_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="7"/><line x1="7" y1="6" x2="4" y2="3"/><line x1="17" y1="6" x2="20" y2="3"/><line x1="12" y1="13" x2="12" y2="9"/><line x1="12" y1="13" x2="15" y2="13"/></svg>';
+
+function resetTimerControl() {
+  btnTimerIcon.style.fontSize = "";
+  btnTimerIcon.innerHTML = ALARM_ICON;
+  state.timerIndex = 0;
+}
+
+// Longer chord-symbol scale labels need a smaller font to fit the round
+// button; shorter roman-numeral labels can stay larger.
+function scaleLabelFontSize(label) {
+  const len = label.length;
+  if (len <= 3) return "15px";
+  if (len <= 6) return "13px";
+  if (len <= 9) return "11px";
+  return "9.5px";
+}
+
+function updateScaleButton() {
+  const label = currentScale().short;
+  btnScaleIcon.style.fontSize = scaleLabelFontSize(label);
+  btnScaleIcon.textContent = label;
+}
+updateScaleButton();
+
+// ---------------------------------------------------------------------------
+// BACKGROUND PLAYBACK
+// ---------------------------------------------------------------------------
+// Mobile browsers only keep audio running when backgrounded / screen-locked
+// if the page registers as an active "media session" -- otherwise the
+// AudioContext typically gets suspended within seconds. This is the main
+// lever available from a web page; note it's much more reliable on Android
+// Chrome than iOS Safari, which restricts background tab audio regardless
+// (a platform limitation, not something fixable from here).
+function setupMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  try {
+    if (typeof MediaMetadata !== "undefined") {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "Ambience",
+        artist: "Generative ambient session",
+        album: "Ambience"
+      });
+    }
+    navigator.mediaSession.setActionHandler("play", () => {
+      initAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      setPlaying(true);
+      armTimer();
+    });
+    navigator.mediaSession.setActionHandler("pause", () => setPlaying(false));
+    navigator.mediaSession.setActionHandler("stop", () => setPlaying(false));
+  } catch (e) { /* unsupported action types etc. -- non-fatal */ }
+}
+setupMediaSession();
+
+// Wake Lock keeps the screen from auto-sleeping while playing, which is the
+// most reliable way to guarantee audio keeps running (a suspended/locked
+// screen is the single biggest cause of playback stopping). It only holds
+// the screen on -- it doesn't itself resume audio if the OS suspends it.
+let wakeLock = null;
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch (e) { /* permission or unsupported -- ignore, not fatal */ }
+}
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    if (state.playing) {
+      if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+      acquireWakeLock(); // wake locks are released automatically when hidden
+    }
+  }
+});
+
+function setPlaying(on, opts) {
+  opts = opts || {};
+  state.playing = on;
+  state.stopping = false;
+  btnPlay.classList.toggle("active", on);
+  btnPlayIcon.innerHTML = on ? "&#10074;&#10074;" : "&#9658;";
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = on ? "playing" : "paused";
+  }
+  if (on) {
+    hint.style.opacity = "0";
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    acquireWakeLock();
+    if (audioCtx && masterGain) {
+      // In case a previous session ended mid slow-fade, make sure the
+      // master level is restored to full before anything new plays.
+      masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
+      masterGain.gain.setValueAtTime(0.9, audioCtx.currentTime);
+    }
+    if (shapes.length === 0 && !opts.skipAutoSpawn) {
+      const rx = 20 + Math.random() * (W - 40);
+      const ry = 20 + Math.random() * (H - 40);
+      const midi = positionToMidi(rx, ry);
+      spawnShape(rx, ry, midi);
+    }
+  } else {
+    // Manual Play/Stop press: cut to silence quickly (much quicker than
+    // the timed slow fade-out), and reset the stop-timer completely --
+    // an interrupted countdown should not silently resume next time.
+    releaseWakeLock();
+    stopAllVoicesFast();
+    if (audioCtx && masterGain) {
+      const t = audioCtx.currentTime;
+      masterGain.gain.cancelScheduledValues(t);
+      masterGain.gain.setValueAtTime(masterGain.gain.value, t);
+      masterGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    }
+    shapes = [];
+    clearTimer();
+    resetTimerControl();
+  }
+}
+
+function clearTimer() {
+  if (timerCountdownInterval) { clearInterval(timerCountdownInterval); timerCountdownInterval = null; }
+  timerEndAt = null;
+}
+
+function formatCountdown(ms) {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+function updateTimerCountdown() {
+  if (timerEndAt == null) return;
+  const remainMs = timerEndAt - Date.now();
+  if (remainMs <= 0) {
+    clearTimer();
+    resetTimerControl();
+    beginTimedFadeOut();
+    return;
+  }
+  btnTimerIcon.style.fontSize = "12px";
+  btnTimerIcon.textContent = formatCountdown(remainMs);
+}
+
+function armTimer() {
+  clearTimer();
+  const opt = TIMER_OPTIONS[state.timerIndex];
+  if (opt.minutes > 0 && state.playing) {
+    timerEndAt = Date.now() + opt.minutes * 60 * 1000;
+    updateTimerCountdown();
+    timerCountdownInterval = setInterval(updateTimerCountdown, 500);
+  }
+}
+
+// Timed stop reaching 0:00: let everything already sounding ring out on a
+// slow fade rather than cutting off abruptly, and stop generating anything
+// new in the meantime.
+function beginTimedFadeOut() {
+  if (!audioCtx || !masterGain) { setPlaying(false); return; }
+  state.stopping = true;
+  const t = audioCtx.currentTime;
+  masterGain.gain.cancelScheduledValues(t);
+  masterGain.gain.setValueAtTime(masterGain.gain.value, t);
+  masterGain.gain.exponentialRampToValueAtTime(0.0001, t + TIMER_FADE_SECONDS);
+  setTimeout(() => {
+    setPlaying(false);
+  }, TIMER_FADE_SECONDS * 1000 + 150);
+}
+
+btnPlay.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  initAudio();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  setPlaying(!state.playing);
+  if (state.playing) armTimer();
+}, { passive: false });
+
+btnKey.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  // Cycle of fifths (+7 semitones) rather than chromatically (+1), so
+  // consecutive presses land on musically related keys: C, G, D, A, E...
+  state.rootIndex = (state.rootIndex + 7) % 12;
+  btnKeyIcon.textContent = NOTE_NAMES[state.rootIndex];
+}, { passive: false });
+
+btnScale.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  state.scaleIndex = (state.scaleIndex + 1) % SCALES.length;
+  updateScaleButton();
+}, { passive: false });
+
+btnShape.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  state.shapeIndex = (state.shapeIndex + 1) % SHAPE_TYPES.length;
+  btnShapeIcon.innerHTML = SHAPE_ICONS[SHAPE_TYPES[state.shapeIndex]];
+}, { passive: false });
+
+btnTimer.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  state.timerIndex = (state.timerIndex + 1) % TIMER_OPTIONS.length;
+  const opt = TIMER_OPTIONS[state.timerIndex];
+  btnTimerIcon.style.fontSize = "";
+  btnTimerIcon.innerHTML = opt.minutes === 0 ? ALARM_ICON : opt.label;
+  // Changing the timer selection always re-arms from scratch (or clears
+  // it, for Off) rather than layering onto whatever was previously running.
+  if (state.playing) armTimer(); else clearTimer();
+}, { passive: false });
+
+// Canvas taps spawn shapes/notes. Coordinates are translated into the
+// locked 9:16 frame's own space, since it may be letterboxed within a
+// differently-shaped viewport. If nothing is playing yet, a tap on the
+// visualiser also starts playback (same as pressing Play), using the
+// tapped point as the first note instead of a random one.
+canvas.addEventListener("pointerdown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  if (!state.playing) {
+    initAudio();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    setPlaying(true, { skipAutoSpawn: true });
+    armTimer();
+  } else if (state.stopping) {
+    return; // mid slow fade-out -- ignore taps until fully stopped
+  }
+
+  const midi = positionToMidi(x, y);
+  spawnShape(x, y, midi);
+}, { passive: true });
+
+// Prevent iOS Safari rubber-band scrolling / pinch zoom.
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+
+})();
+</script>
+</body>
+</html>
