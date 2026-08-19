@@ -1,4 +1,3 @@
-
 // Minimal service worker for Ambience.
 //
 // This doesn't do offline caching of anything fancy -- its purpose here is
